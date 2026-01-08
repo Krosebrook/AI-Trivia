@@ -1,7 +1,7 @@
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { GeminiService } from './services/geminiService';
-import { GameStatus, HostPersonality, TriviaQuestion, TranscriptionItem, Difficulty } from './types';
+import { GameStatus, HostPersonality, TriviaQuestion, TranscriptionItem, Difficulty, QuestionResult } from './types';
 import { HOST_PERSONALITIES, TOPICS } from './constants';
 import AudioVisualizer from './components/AudioVisualizer';
 import { GoogleGenAI, Modality, LiveServerMessage, Type, FunctionDeclaration } from '@google/genai';
@@ -18,6 +18,7 @@ const App: React.FC = () => {
   const [score, setScore] = useState(0);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [hostReaction, setHostReaction] = useState<'neutral' | 'correct' | 'incorrect'>('neutral');
+  const [gameHistory, setGameHistory] = useState<QuestionResult[]>([]);
 
   // Live API Refs
   const audioContextRef = useRef<{ input: AudioContext; output: AudioContext } | null>(null);
@@ -95,6 +96,7 @@ const App: React.FC = () => {
       setCurrentQuestionIndex(0);
       setTranscriptions([]);
       setHostReaction('neutral');
+      setGameHistory([]);
       
       const newQuestions = await gemini.generateTriviaQuestions(topic, difficulty);
       if (newQuestions.length === 0) {
@@ -120,7 +122,7 @@ const App: React.FC = () => {
         MANDATORY RULES:
         1. Welcome the player warmly in your persona.
         2. Ask questions one by one. Wait for a response.
-        3. When a user answers, IMMEDIATELY call the 'updateScore' tool with 'isCorrect' (true/false) and the new 'currentScore'. This triggers the host's visual reaction in the UI.
+        3. When a user answers, IMMEDIATELY call the 'updateScore' tool.
         4. Provide immediate, character-appropriate feedback (correct/incorrect) and share the short explanation provided.
         5. After question 5, announce the final score in a way that fits your personality.
         6. Once the summary is done, say "The show has ended. Goodbye!" which signals the end.
@@ -153,28 +155,40 @@ const App: React.FC = () => {
             scriptProcessor.connect(inputCtx.destination);
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Handle Tool Calls (Score Update & Reaction)
             if (message.toolCall) {
               for (const fc of message.toolCall.functionCalls) {
                 if (fc.name === 'updateScore') {
                   const { isCorrect, currentScore } = fc.args as { isCorrect: boolean, currentScore: number };
+                  
+                  // Update history state
+                  setGameHistory(prev => {
+                    const idx = prev.length;
+                    const q = newQuestions[idx];
+                    if (q) {
+                      return [...prev, {
+                        question: q.question,
+                        correctAnswer: q.answer,
+                        userWasCorrect: isCorrect
+                      }];
+                    }
+                    return prev;
+                  });
+
                   setScore(currentScore);
                   setCurrentQuestionIndex(prev => prev + 1);
                   setHostReaction(isCorrect ? 'correct' : 'incorrect');
                   
-                  // Send response back to model
                   sessionPromise.then(s => s.sendToolResponse({
                     functionResponses: [{
                       id: fc.id,
                       name: fc.name,
-                      response: { result: "Score and reaction updated in UI" }
+                      response: { result: "Score and history updated" }
                     }]
                   }));
                 }
               }
             }
 
-            // Handle Audio output
             const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (audioData) {
               setIsHostSpeaking(true);
@@ -216,7 +230,7 @@ const App: React.FC = () => {
 
             const lastText = message.serverContent?.outputTranscription?.text || "";
             if (lastText.toLowerCase().includes("goodbye") || lastText.toLowerCase().includes("show has ended")) {
-               setTimeout(() => setStatus(GameStatus.FINISHED), 2000);
+               setTimeout(() => setStatus(GameStatus.FINISHED), 3000);
             }
           },
           onerror: (e) => {
@@ -382,7 +396,6 @@ const App: React.FC = () => {
             
             <div className="flex flex-col md:flex-row items-center gap-8">
               <div className="relative group">
-                {/* Visual Feedback Overlays */}
                 <div className={`absolute -inset-2 rounded-full blur-xl transition-all duration-500 opacity-0 ${
                   hostReaction === 'correct' ? 'bg-green-500 opacity-40 scale-110' : 
                   hostReaction === 'incorrect' ? 'bg-indigo-500 opacity-40 scale-110' : ''
@@ -398,7 +411,6 @@ const App: React.FC = () => {
                   }`} 
                 />
                 
-                {/* Floating Reaction Icons */}
                 {hostReaction === 'correct' && (
                   <div className="absolute top-0 right-0 z-20 bg-green-500 text-white w-12 h-12 rounded-full flex items-center justify-center shadow-lg animate-[bounce_1s_infinite]">
                     <i className="fas fa-smile text-2xl"></i>
@@ -462,7 +474,6 @@ const App: React.FC = () => {
                   </div>
                 </div>
               ))}
-              {transcriptions.length === 0 && <p className="text-center text-gray-600 text-xs italic">Start speaking to see your transcription here...</p>}
             </div>
           </div>
 
@@ -484,26 +495,49 @@ const App: React.FC = () => {
       )}
 
       {status === GameStatus.FINISHED && (
-        <div className="text-center bg-gray-800 rounded-3xl p-12 border border-gray-700 shadow-2xl animate-bounceIn">
-          <div className="w-24 h-24 bg-yellow-500/10 rounded-full flex items-center justify-center mx-auto mb-6 border border-yellow-500/30">
-            <i className="fas fa-trophy text-4xl text-yellow-500"></i>
+        <div className="space-y-6 animate-fadeIn">
+          <div className="text-center bg-gray-800 rounded-3xl p-12 border border-gray-700 shadow-2xl relative overflow-hidden">
+            <div className="w-24 h-24 bg-yellow-500/10 rounded-full flex items-center justify-center mx-auto mb-6 border border-yellow-500/30">
+              <i className="fas fa-trophy text-4xl text-yellow-500"></i>
+            </div>
+            <h2 className="text-4xl font-black mb-2 uppercase italic tracking-tighter">Final Score</h2>
+            <div className="text-7xl font-black text-yellow-500 mb-6 drop-shadow-lg">{score} <span className="text-2xl text-gray-500">/ 5</span></div>
+            
+            <p className="text-gray-400 text-xl max-w-md mx-auto mb-8">
+              {selectedHost.name} just finished your {difficulty} {topic} challenge.
+            </p>
           </div>
-          <h2 className="text-4xl font-black mb-2 uppercase italic tracking-tighter">Final Score</h2>
-          <div className="text-7xl font-black text-yellow-500 mb-6 drop-shadow-lg">{score} <span className="text-2xl text-gray-500">/ 5</span></div>
-          
-          <p className="text-gray-400 text-xl max-w-md mx-auto mb-10">
-            {selectedHost.name} just finished your {difficulty} {topic} challenge. 
-            {score === 5 ? " Perfect run!" : score >= 3 ? " Not bad at all!" : " Better luck next time!"}
-          </p>
-          
-          <div className="flex flex-col sm:flex-row gap-4 justify-center">
-            <button
-              onClick={() => setStatus(GameStatus.SETUP)}
-              className="bg-yellow-500 text-black px-10 py-4 rounded-2xl font-black uppercase text-xl hover:scale-105 transition-all shadow-xl shadow-yellow-500/20 flex items-center justify-center gap-2"
-            >
-              <i className="fas fa-redo"></i> Play Again
-            </button>
+
+          <div className="bg-gray-800 rounded-3xl p-8 border border-gray-700 shadow-xl">
+             <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+                <i className="fas fa-history text-orange-500"></i> Question Summary
+             </h3>
+             <div className="space-y-4">
+                {gameHistory.map((res, i) => (
+                   <div key={i} className={`p-4 rounded-2xl border ${res.userWasCorrect ? 'bg-green-500/5 border-green-500/20' : 'bg-red-500/5 border-red-500/20'}`}>
+                      <div className="flex items-start gap-3">
+                         <div className={`mt-1 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${res.userWasCorrect ? 'bg-green-500 text-black' : 'bg-red-500 text-white'}`}>
+                            {res.userWasCorrect ? <i className="fas fa-check"></i> : <i className="fas fa-times"></i>}
+                         </div>
+                         <div className="flex-1">
+                            <p className="font-bold text-gray-200">{res.question}</p>
+                            <p className="text-sm text-gray-400 mt-2">
+                               <span className="text-xs uppercase font-bold tracking-widest text-gray-500 mr-2">Answer:</span> 
+                               {res.correctAnswer}
+                            </p>
+                         </div>
+                      </div>
+                   </div>
+                ))}
+             </div>
           </div>
+          
+          <button
+            onClick={() => setStatus(GameStatus.SETUP)}
+            className="w-full bg-yellow-500 text-black py-6 rounded-2xl font-black uppercase text-2xl hover:scale-[1.01] transition-all shadow-xl shadow-yellow-500/20 flex items-center justify-center gap-4"
+          >
+            <i className="fas fa-redo"></i> Play Another Show
+          </button>
         </div>
       )}
 
@@ -516,12 +550,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="mt-12 py-8 text-center text-gray-600 text-[10px] md:text-xs border-t border-gray-800/50">
-        <div className="flex justify-center gap-6 mb-4">
-          <span className="flex items-center gap-1"><i className="fas fa-check-circle text-green-500"></i> Search Grounding Active</span>
-          <span className="flex items-center gap-1"><i className="fas fa-bolt text-yellow-500"></i> Tool Calling Enabled</span>
-        </div>
         <p>© 2025 AI TRIVIA NIGHT • DYNAMIC HOST ARCHETYPES • MULTI-LEVEL CHALLENGES</p>
-        <p className="mt-1 opacity-50">Best experienced with a high-quality microphone and stable connection.</p>
       </footer>
     </div>
   );

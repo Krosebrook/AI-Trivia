@@ -16,6 +16,12 @@ export interface TriviaQuestion {
   source?: string;
 }
 
+export interface QuestionResult {
+  question: string;
+  correctAnswer: string;
+  userWasCorrect: boolean;
+}
+
 export enum GameStatus {
   SETUP = 'SETUP',
   LOADING_QUESTIONS = 'LOADING_QUESTIONS',
