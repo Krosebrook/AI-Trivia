@@ -4,7 +4,7 @@ import { GeminiService } from './services/geminiService';
 import { GameStatus, HostPersonality, TriviaQuestion, TranscriptionItem, Difficulty } from './types';
 import { HOST_PERSONALITIES, TOPICS } from './constants';
 import AudioVisualizer from './components/AudioVisualizer';
-import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
+import { GoogleGenAI, Modality, LiveServerMessage, Type, FunctionDeclaration } from '@google/genai';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<GameStatus>(GameStatus.SETUP);
@@ -15,6 +15,9 @@ const App: React.FC = () => {
   const [transcriptions, setTranscriptions] = useState<TranscriptionItem[]>([]);
   const [isHostSpeaking, setIsHostSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [score, setScore] = useState(0);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [hostReaction, setHostReaction] = useState<'neutral' | 'correct' | 'incorrect'>('neutral');
 
   // Live API Refs
   const audioContextRef = useRef<{ input: AudioContext; output: AudioContext } | null>(null);
@@ -24,6 +27,14 @@ const App: React.FC = () => {
   const micStreamRef = useRef<MediaStream | null>(null);
 
   const gemini = new GeminiService();
+
+  // Reset host reaction after a delay
+  useEffect(() => {
+    if (hostReaction !== 'neutral') {
+      const timer = setTimeout(() => setHostReaction('neutral'), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [hostReaction]);
 
   // Initialize Audio Contexts
   const initAudio = useCallback(async () => {
@@ -53,12 +64,37 @@ const App: React.FC = () => {
     sourcesRef.current.clear();
     setStatus(GameStatus.SETUP);
     setIsHostSpeaking(false);
+    setHostReaction('neutral');
   }, []);
+
+  // Function to be called by the AI to sync score
+  const updateScoreTool: FunctionDeclaration = {
+    name: 'updateScore',
+    parameters: {
+      type: Type.OBJECT,
+      description: 'Call this function after every user answer to update the game score and trigger visual feedback.',
+      properties: {
+        isCorrect: {
+          type: Type.BOOLEAN,
+          description: 'True if the user got the answer correct, false otherwise.',
+        },
+        currentScore: {
+          type: Type.NUMBER,
+          description: 'The updated total correct answers count.',
+        }
+      },
+      required: ['isCorrect', 'currentScore'],
+    },
+  };
 
   const startGame = async () => {
     try {
       setStatus(GameStatus.LOADING_QUESTIONS);
       setError(null);
+      setScore(0);
+      setCurrentQuestionIndex(0);
+      setTranscriptions([]);
+      setHostReaction('neutral');
       
       const newQuestions = await gemini.generateTriviaQuestions(topic, difficulty);
       if (newQuestions.length === 0) {
@@ -74,19 +110,21 @@ const App: React.FC = () => {
         GAME CONTEXT:
         Topic: "${topic}"
         Difficulty: "${difficulty}"
+        Total Questions: 5
         You are hosting a 5-question trivia challenge. 
-        Acknowledge the chosen difficulty level (${difficulty}) in your introduction. If it is "Hard", sound impressed or warningly challenging. If it is "Easy", keep it light and fun.
+        Acknowledge the chosen difficulty level (${difficulty}) in your introduction.
         
         QUESTIONS TO ASK:
         ${newQuestions.map((q, i) => `${i + 1}. Q: ${q.question} | Options: ${q.options.join(', ')} | A: ${q.answer} | Explain: ${q.explanation}`).join('\n')}
         
-        RULES:
+        MANDATORY RULES:
         1. Welcome the player warmly in your persona.
-        2. Ask questions one by one.
-        3. Listen for the user's answer (they might say A, B, C, D or the text of the answer).
+        2. Ask questions one by one. Wait for a response.
+        3. When a user answers, IMMEDIATELY call the 'updateScore' tool with 'isCorrect' (true/false) and the new 'currentScore'. This triggers the host's visual reaction in the UI.
         4. Provide immediate, character-appropriate feedback (correct/incorrect) and share the short explanation provided.
-        5. Keep score internally and announce a grand character-filled summary at the end.
-        6. Stay in character consistently!
+        5. After question 5, announce the final score in a way that fits your personality.
+        6. Once the summary is done, say "The show has ended. Goodbye!" which signals the end.
+        7. Stay in character consistently! Use your specific voice and style.
       `;
 
       const sessionPromise = ai.live.connect({
@@ -115,6 +153,28 @@ const App: React.FC = () => {
             scriptProcessor.connect(inputCtx.destination);
           },
           onmessage: async (message: LiveServerMessage) => {
+            // Handle Tool Calls (Score Update & Reaction)
+            if (message.toolCall) {
+              for (const fc of message.toolCall.functionCalls) {
+                if (fc.name === 'updateScore') {
+                  const { isCorrect, currentScore } = fc.args as { isCorrect: boolean, currentScore: number };
+                  setScore(currentScore);
+                  setCurrentQuestionIndex(prev => prev + 1);
+                  setHostReaction(isCorrect ? 'correct' : 'incorrect');
+                  
+                  // Send response back to model
+                  sessionPromise.then(s => s.sendToolResponse({
+                    functionResponses: [{
+                      id: fc.id,
+                      name: fc.name,
+                      response: { result: "Score and reaction updated in UI" }
+                    }]
+                  }));
+                }
+              }
+            }
+
+            // Handle Audio output
             const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (audioData) {
               setIsHostSpeaking(true);
@@ -154,8 +214,9 @@ const App: React.FC = () => {
               setTranscriptions(prev => [...prev.slice(-10), { role: 'model', text }]);
             }
 
-            if (message.serverContent?.turnComplete) {
-              // End of game check or score reporting logic can be handled by model
+            const lastText = message.serverContent?.outputTranscription?.text || "";
+            if (lastText.toLowerCase().includes("goodbye") || lastText.toLowerCase().includes("show has ended")) {
+               setTimeout(() => setStatus(GameStatus.FINISHED), 2000);
             }
           },
           onerror: (e) => {
@@ -171,6 +232,7 @@ const App: React.FC = () => {
         config: {
           responseModalities: [Modality.AUDIO],
           systemInstruction,
+          tools: [{ functionDeclarations: [updateScoreTool] }],
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedHost.voiceName } }
           },
@@ -296,34 +358,83 @@ const App: React.FC = () => {
 
       {status === GameStatus.PLAYING && (
         <div className="space-y-6 animate-fadeIn">
+          {/* HUD/Score Bar */}
+          <div className="flex justify-between items-center bg-gray-800 p-4 rounded-2xl border border-gray-700 shadow-lg">
+             <div className="flex items-center gap-4">
+                <div className="text-center">
+                   <p className="text-[10px] uppercase font-bold text-gray-500">Score</p>
+                   <p className="text-2xl font-black text-yellow-500">{score}</p>
+                </div>
+                <div className="h-10 w-[1px] bg-gray-700"></div>
+                <div className="text-center">
+                   <p className="text-[10px] uppercase font-bold text-gray-500">Progress</p>
+                   <p className="text-xl font-bold text-gray-300">{Math.min(currentQuestionIndex + 1, 5)} / 5</p>
+                </div>
+             </div>
+             <div className="flex items-center gap-2 bg-black/30 px-4 py-2 rounded-xl">
+                <i className="fas fa-brain text-orange-400"></i>
+                <span className="text-xs font-bold uppercase tracking-widest">{topic}</span>
+             </div>
+          </div>
+
           <div className="bg-gray-800 rounded-3xl p-8 border border-gray-700 shadow-2xl relative overflow-hidden">
             <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-orange-500 via-yellow-500 to-orange-500 animate-shimmer"></div>
             
             <div className="flex flex-col md:flex-row items-center gap-8">
-              <div className="relative">
+              <div className="relative group">
+                {/* Visual Feedback Overlays */}
+                <div className={`absolute -inset-2 rounded-full blur-xl transition-all duration-500 opacity-0 ${
+                  hostReaction === 'correct' ? 'bg-green-500 opacity-40 scale-110' : 
+                  hostReaction === 'incorrect' ? 'bg-indigo-500 opacity-40 scale-110' : ''
+                }`}></div>
+                
                 <img 
                   src={selectedHost.avatar} 
                   alt={selectedHost.name} 
-                  className={`w-40 h-40 md:w-56 md:h-56 rounded-full border-4 shadow-2xl transition-all duration-300 ${isHostSpeaking ? 'border-yellow-400 scale-105 shadow-yellow-400/40' : 'border-gray-600'}`} 
+                  className={`w-40 h-40 md:w-56 md:h-56 rounded-full border-4 shadow-2xl transition-all duration-500 relative z-10 ${
+                    hostReaction === 'correct' ? 'border-green-400 scale-105 animate-bounce' : 
+                    hostReaction === 'incorrect' ? 'border-indigo-400 grayscale-[20%] animate-pulse' : 
+                    isHostSpeaking ? 'border-yellow-400 scale-105 shadow-yellow-400/40' : 'border-gray-600'
+                  }`} 
                 />
-                <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 bg-gray-900 px-4 py-2 rounded-full border border-gray-700 shadow-lg">
-                  <AudioVisualizer isSpeaking={isHostSpeaking} color="#eab308" />
+                
+                {/* Floating Reaction Icons */}
+                {hostReaction === 'correct' && (
+                  <div className="absolute top-0 right-0 z-20 bg-green-500 text-white w-12 h-12 rounded-full flex items-center justify-center shadow-lg animate-[bounce_1s_infinite]">
+                    <i className="fas fa-smile text-2xl"></i>
+                  </div>
+                )}
+                {hostReaction === 'incorrect' && (
+                  <div className="absolute top-0 right-0 z-20 bg-indigo-600 text-white w-12 h-12 rounded-full flex items-center justify-center shadow-lg animate-[pulse_1.5s_infinite]">
+                    <i className="fas fa-lightbulb text-2xl"></i>
+                  </div>
+                )}
+
+                <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 bg-gray-900 px-4 py-2 rounded-full border border-gray-700 shadow-lg z-20">
+                  <AudioVisualizer isSpeaking={isHostSpeaking} color={hostReaction === 'correct' ? '#4ade80' : hostReaction === 'incorrect' ? '#818cf8' : '#eab308'} />
                 </div>
               </div>
 
               <div className="flex-1 text-center md:text-left">
                 <div className="flex flex-wrap justify-center md:justify-start gap-2 mb-3">
-                  <span className="bg-orange-500/20 text-orange-400 text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-widest">
-                    LIVE SESSION
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-widest transition-colors ${
+                    hostReaction === 'correct' ? 'bg-green-500/20 text-green-400' : 
+                    hostReaction === 'incorrect' ? 'bg-indigo-500/20 text-indigo-400' : 
+                    'bg-orange-500/20 text-orange-400'
+                  }`}>
+                    {hostReaction === 'neutral' ? 'LIVE SESSION' : hostReaction.toUpperCase()}
                   </span>
                   <span className="bg-red-500/20 text-red-400 text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-widest">
                     {difficulty}
                   </span>
                 </div>
                 <h2 className="text-3xl font-black mb-1">{selectedHost.name}</h2>
-                <p className="text-gray-400 mb-4 italic">Themed Category: {topic}</p>
                 
-                <div className="bg-black/40 rounded-2xl p-6 min-h-[140px] flex items-center justify-center text-center backdrop-blur-sm border border-white/5">
+                <div className={`bg-black/40 rounded-2xl p-6 min-h-[140px] flex items-center justify-center text-center backdrop-blur-sm border transition-all duration-300 ${
+                  hostReaction === 'correct' ? 'border-green-500/30 bg-green-950/20' : 
+                  hostReaction === 'incorrect' ? 'border-indigo-500/30 bg-indigo-950/20' : 
+                  'border-white/5'
+                }`}>
                   <p className="text-xl md:text-2xl font-medium leading-relaxed text-gray-100">
                     {transcriptions.length > 0 
                       ? transcriptions[transcriptions.length - 1].text 
@@ -375,18 +486,22 @@ const App: React.FC = () => {
       {status === GameStatus.FINISHED && (
         <div className="text-center bg-gray-800 rounded-3xl p-12 border border-gray-700 shadow-2xl animate-bounceIn">
           <div className="w-24 h-24 bg-yellow-500/10 rounded-full flex items-center justify-center mx-auto mb-6 border border-yellow-500/30">
-            <i className="fas fa-microphone-slash text-4xl text-yellow-500"></i>
+            <i className="fas fa-trophy text-4xl text-yellow-500"></i>
           </div>
-          <h2 className="text-4xl font-black mb-4">SHOW CONCLUDED!</h2>
+          <h2 className="text-4xl font-black mb-2 uppercase italic tracking-tighter">Final Score</h2>
+          <div className="text-7xl font-black text-yellow-500 mb-6 drop-shadow-lg">{score} <span className="text-2xl text-gray-500">/ 5</span></div>
+          
           <p className="text-gray-400 text-xl max-w-md mx-auto mb-10">
-            {selectedHost.name} has left the studio. Great job on the {difficulty} {topic} challenge!
+            {selectedHost.name} just finished your {difficulty} {topic} challenge. 
+            {score === 5 ? " Perfect run!" : score >= 3 ? " Not bad at all!" : " Better luck next time!"}
           </p>
+          
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <button
               onClick={() => setStatus(GameStatus.SETUP)}
               className="bg-yellow-500 text-black px-10 py-4 rounded-2xl font-black uppercase text-xl hover:scale-105 transition-all shadow-xl shadow-yellow-500/20 flex items-center justify-center gap-2"
             >
-              <i className="fas fa-redo"></i> New Session
+              <i className="fas fa-redo"></i> Play Again
             </button>
           </div>
         </div>
@@ -403,7 +518,7 @@ const App: React.FC = () => {
       <footer className="mt-12 py-8 text-center text-gray-600 text-[10px] md:text-xs border-t border-gray-800/50">
         <div className="flex justify-center gap-6 mb-4">
           <span className="flex items-center gap-1"><i className="fas fa-check-circle text-green-500"></i> Search Grounding Active</span>
-          <span className="flex items-center gap-1"><i className="fas fa-bolt text-yellow-500"></i> Real-time Audio</span>
+          <span className="flex items-center gap-1"><i className="fas fa-bolt text-yellow-500"></i> Tool Calling Enabled</span>
         </div>
         <p>© 2025 AI TRIVIA NIGHT • DYNAMIC HOST ARCHETYPES • MULTI-LEVEL CHALLENGES</p>
         <p className="mt-1 opacity-50">Best experienced with a high-quality microphone and stable connection.</p>
