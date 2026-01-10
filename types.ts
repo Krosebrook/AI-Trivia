@@ -20,6 +20,14 @@ export interface QuestionResult {
   question: string;
   correctAnswer: string;
   userWasCorrect: boolean;
+  hintUsed: boolean;
+}
+
+export interface LeaderboardEntry {
+  name: string;
+  score: number;
+  topic: string;
+  date: string;
 }
 
 export enum GameStatus {

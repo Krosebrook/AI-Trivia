@@ -1,9 +1,11 @@
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { GeminiService } from './services/geminiService';
-import { GameStatus, HostPersonality, TriviaQuestion, TranscriptionItem, Difficulty, QuestionResult } from './types';
+import { GameStatus, HostPersonality, TriviaQuestion, TranscriptionItem, Difficulty, QuestionResult, LeaderboardEntry } from './types';
 import { HOST_PERSONALITIES, TOPICS } from './constants';
 import AudioVisualizer from './components/AudioVisualizer';
+import TriviaCard from './components/TriviaCard';
+import Leaderboard from './components/Leaderboard';
 import { GoogleGenAI, Modality, LiveServerMessage, Type, FunctionDeclaration } from '@google/genai';
 
 const App: React.FC = () => {
@@ -16,9 +18,18 @@ const App: React.FC = () => {
   const [isHostSpeaking, setIsHostSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [score, setScore] = useState(0);
+  const [bestScore, setBestScore] = useState(0);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [hostReaction, setHostReaction] = useState<'neutral' | 'correct' | 'incorrect'>('neutral');
   const [gameHistory, setGameHistory] = useState<QuestionResult[]>([]);
+  const [isProcessingAnswer, setIsProcessingAnswer] = useState(false);
+  const [hasUsedHint, setHasUsedHint] = useState(false);
+  
+  // Leaderboard State
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [playerName, setPlayerName] = useState('');
+  const [hasSavedScore, setHasSavedScore] = useState(false);
 
   // Live API Refs
   const audioContextRef = useRef<{ input: AudioContext; output: AudioContext } | null>(null);
@@ -29,13 +40,43 @@ const App: React.FC = () => {
 
   const gemini = new GeminiService();
 
+  // Load leaderboard and best score on mount
+  useEffect(() => {
+    const savedBest = localStorage.getItem('trivia_best_score');
+    if (savedBest) setBestScore(parseInt(savedBest, 10));
+
+    const savedLeaderboard = localStorage.getItem('trivia_leaderboard');
+    if (savedLeaderboard) {
+      try {
+        setLeaderboard(JSON.parse(savedLeaderboard));
+      } catch (e) {
+        console.error("Failed to parse leaderboard", e);
+      }
+    }
+  }, []);
+
   // Reset host reaction after a delay
   useEffect(() => {
     if (hostReaction !== 'neutral') {
-      const timer = setTimeout(() => setHostReaction('neutral'), 3000);
+      const timer = setTimeout(() => {
+        setHostReaction('neutral');
+        setIsProcessingAnswer(false); // Re-enable interaction for next question
+        setHasUsedHint(false); // Reset hint state for next question
+      }, 5000); // 5 seconds to read explanation
       return () => clearTimeout(timer);
     }
   }, [hostReaction]);
+
+  // Update best score when game ends
+  useEffect(() => {
+    if (status === GameStatus.FINISHED) {
+      setHasSavedScore(false);
+      if (score > bestScore) {
+        setBestScore(score);
+        localStorage.setItem('trivia_best_score', score.toString());
+      }
+    }
+  }, [status, score, bestScore]);
 
   // Initialize Audio Contexts
   const initAudio = useCallback(async () => {
@@ -52,6 +93,13 @@ const App: React.FC = () => {
     return audioContextRef.current;
   }, []);
 
+  const stopAudioPlayback = useCallback(() => {
+    sourcesRef.current.forEach(s => s.stop());
+    sourcesRef.current.clear();
+    setIsHostSpeaking(false);
+    nextStartTimeRef.current = 0;
+  }, []);
+
   const stopGame = useCallback(() => {
     if (sessionRef.current) {
       sessionRef.current.close();
@@ -61,12 +109,34 @@ const App: React.FC = () => {
       micStreamRef.current.getTracks().forEach(t => t.stop());
       micStreamRef.current = null;
     }
-    sourcesRef.current.forEach(s => s.stop());
-    sourcesRef.current.clear();
+    stopAudioPlayback();
     setStatus(GameStatus.SETUP);
     setIsHostSpeaking(false);
     setHostReaction('neutral');
-  }, []);
+    setIsProcessingAnswer(false);
+    setHasUsedHint(false);
+  }, [stopAudioPlayback]);
+
+  // Save Score to Leaderboard
+  const handleSaveScore = () => {
+    if (!playerName.trim()) return;
+    
+    const newEntry: LeaderboardEntry = {
+      name: playerName.trim(),
+      score: score,
+      topic: topic,
+      date: new Date().toISOString()
+    };
+    
+    const updatedLeaderboard = [...leaderboard, newEntry]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5); // Keep only top 5
+      
+    setLeaderboard(updatedLeaderboard);
+    localStorage.setItem('trivia_leaderboard', JSON.stringify(updatedLeaderboard));
+    setHasSavedScore(true);
+    setShowLeaderboard(true); // Auto show leaderboard after saving
+  };
 
   // Function to be called by the AI to sync score
   const updateScoreTool: FunctionDeclaration = {
@@ -88,6 +158,56 @@ const App: React.FC = () => {
     },
   };
 
+  // Handle Hint Request
+  const handleHintRequest = async () => {
+    if (isProcessingAnswer || hasUsedHint || !sessionRef.current) return;
+    
+    setHasUsedHint(true);
+    stopAudioPlayback(); // Stop any current speech
+
+    try {
+      await sessionRef.current.send({
+        clientContent: {
+          turns: [{
+            role: 'user',
+            parts: [{ 
+              text: `I need a hint, ${selectedHost.name}. Please give me a subtle clue in your unique voice and style, but don't give away the answer!` 
+            }]
+          }],
+          turnComplete: true
+        }
+      });
+      setTranscriptions(prev => [...prev.slice(-10), { role: 'user', text: "(Requested a Hint)" }]);
+    } catch (e) {
+      console.error("Failed to request hint:", e);
+      setHasUsedHint(false);
+    }
+  };
+
+  // Handle manual option selection
+  const handleOptionSelect = async (option: string) => {
+    if (isProcessingAnswer || !sessionRef.current) return;
+    
+    setIsProcessingAnswer(true);
+    stopAudioPlayback(); 
+
+    try {
+      await sessionRef.current.send({
+        clientContent: {
+          turns: [{
+            role: 'user',
+            parts: [{ text: `My answer is ${option}` }]
+          }],
+          turnComplete: true
+        }
+      });
+      setTranscriptions(prev => [...prev.slice(-10), { role: 'user', text: `(Selected): ${option}` }]);
+    } catch (e) {
+      console.error("Failed to send text answer:", e);
+      setIsProcessingAnswer(false);
+    }
+  };
+
   const startGame = async () => {
     try {
       setStatus(GameStatus.LOADING_QUESTIONS);
@@ -97,6 +217,9 @@ const App: React.FC = () => {
       setTranscriptions([]);
       setHostReaction('neutral');
       setGameHistory([]);
+      setIsProcessingAnswer(false);
+      setHasUsedHint(false);
+      setPlayerName(''); // Reset player name for new game
       
       const newQuestions = await gemini.generateTriviaQuestions(topic, difficulty);
       if (newQuestions.length === 0) {
@@ -123,10 +246,11 @@ const App: React.FC = () => {
         1. Welcome the player warmly in your persona.
         2. Ask questions one by one. Wait for a response.
         3. When a user answers, IMMEDIATELY call the 'updateScore' tool.
-        4. Provide immediate, character-appropriate feedback (correct/incorrect) and share the short explanation provided.
-        5. After question 5, announce the final score in a way that fits your personality.
-        6. Once the summary is done, say "The show has ended. Goodbye!" which signals the end.
-        7. Stay in character consistently! Use your specific voice and style.
+        4. Provide immediate feedback (correct/incorrect) and share the short explanation.
+        5. If the user asks for a HINT, provide a subtle clue based on the question.
+        6. After question 5, announce the final score.
+        7. Once the summary is done, say "The show has ended. Goodbye!" to signal the end.
+        8. Stay in character consistently!
       `;
 
       const sessionPromise = ai.live.connect({
@@ -160,7 +284,6 @@ const App: React.FC = () => {
                 if (fc.name === 'updateScore') {
                   const { isCorrect, currentScore } = fc.args as { isCorrect: boolean, currentScore: number };
                   
-                  // Update history state
                   setGameHistory(prev => {
                     const idx = prev.length;
                     const q = newQuestions[idx];
@@ -168,7 +291,8 @@ const App: React.FC = () => {
                       return [...prev, {
                         question: q.question,
                         correctAnswer: q.answer,
-                        userWasCorrect: isCorrect
+                        userWasCorrect: isCorrect,
+                        hintUsed: hasUsedHint
                       }];
                     }
                     return prev;
@@ -182,7 +306,7 @@ const App: React.FC = () => {
                     functionResponses: [{
                       id: fc.id,
                       name: fc.name,
-                      response: { result: "Score and history updated" }
+                      response: { result: "Score updated" }
                     }]
                   }));
                 }
@@ -213,10 +337,7 @@ const App: React.FC = () => {
             }
 
             if (message.serverContent?.interrupted) {
-              sourcesRef.current.forEach(s => s.stop());
-              sourcesRef.current.clear();
-              nextStartTimeRef.current = 0;
-              setIsHostSpeaking(false);
+              stopAudioPlayback();
             }
 
             if (message.serverContent?.inputTranscription) {
@@ -264,19 +385,57 @@ const App: React.FC = () => {
     }
   };
 
+  const displayQuestionIndex = (hostReaction !== 'neutral' && currentQuestionIndex > 0) 
+    ? currentQuestionIndex - 1 
+    : currentQuestionIndex;
+  
+  const currentQuestion = questions[Math.min(displayQuestionIndex, questions.length - 1)];
+
+  // Check if player qualifies for leaderboard
+  const qualifiesForLeaderboard = score > 0 && (leaderboard.length < 5 || score > leaderboard[leaderboard.length - 1].score);
+
   return (
     <div className="max-w-4xl mx-auto p-4 md:p-8">
-      <header className="text-center mb-8">
+      {/* Global Leaderboard Modal */}
+      {showLeaderboard && (
+        <Leaderboard 
+          entries={leaderboard} 
+          onClose={() => setShowLeaderboard(false)} 
+        />
+      )}
+
+      <header className="text-center mb-8 relative">
         <h1 className="text-4xl md:text-6xl font-black bg-clip-text text-transparent bg-gradient-to-r from-yellow-400 to-orange-600 mb-2 italic drop-shadow-sm">
           AI TRIVIA NIGHT
         </h1>
         <p className="text-gray-400 uppercase tracking-widest text-sm font-semibold">Real-Time Host Personalities</p>
+        
+        {/* Header Stats */}
+        <div className="absolute top-0 right-0 hidden md:flex flex-col items-end gap-2">
+           {bestScore > 0 && (
+             <div className="text-right">
+                <p className="text-[10px] uppercase font-bold text-gray-500">Personal Best</p>
+                <p className="text-xl font-bold text-yellow-500">{bestScore} / 5</p>
+             </div>
+           )}
+        </div>
       </header>
 
       {status === GameStatus.SETUP && (
-        <div className="space-y-8 animate-fadeIn">
+        <div className="space-y-8 animate-fadeIn relative">
+          
+          {/* Main Menu Leaderboard Toggle */}
+          <div className="absolute top-0 right-0 z-10">
+            <button 
+              onClick={() => setShowLeaderboard(true)}
+              className="bg-gray-800 hover:bg-gray-700 text-yellow-500 px-4 py-2 rounded-full font-bold text-xs uppercase tracking-widest border border-gray-700 shadow-lg transition-all flex items-center gap-2"
+            >
+              <i className="fas fa-trophy"></i> Hall of Fame
+            </button>
+          </div>
+
           {/* Difficulty Picker */}
-          <section className="bg-gray-800 rounded-2xl p-6 border border-gray-700 shadow-xl">
+          <section className="bg-gray-800 rounded-2xl p-6 border border-gray-700 shadow-xl mt-10 md:mt-0">
             <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
               <i className="fas fa-gauge-high text-red-500"></i> Set Difficulty
             </h2>
@@ -382,7 +541,7 @@ const App: React.FC = () => {
                 <div className="h-10 w-[1px] bg-gray-700"></div>
                 <div className="text-center">
                    <p className="text-[10px] uppercase font-bold text-gray-500">Progress</p>
-                   <p className="text-xl font-bold text-gray-300">{Math.min(currentQuestionIndex + 1, 5)} / 5</p>
+                   <p className="text-xl font-bold text-gray-300">{Math.min(displayQuestionIndex + 1, 5)} / 5</p>
                 </div>
              </div>
              <div className="flex items-center gap-2 bg-black/30 px-4 py-2 rounded-xl">
@@ -391,7 +550,7 @@ const App: React.FC = () => {
              </div>
           </div>
 
-          <div className="bg-gray-800 rounded-3xl p-8 border border-gray-700 shadow-2xl relative overflow-hidden">
+          <div className="bg-gray-800 rounded-3xl p-6 md:p-8 border border-gray-700 shadow-2xl relative overflow-hidden">
             <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-orange-500 via-yellow-500 to-orange-500 animate-shimmer"></div>
             
             <div className="flex flex-col md:flex-row items-center gap-8">
@@ -401,74 +560,77 @@ const App: React.FC = () => {
                   hostReaction === 'incorrect' ? 'bg-indigo-500 opacity-40 scale-110' : ''
                 }`}></div>
                 
+                {/* Floating Feedback Icons */}
+                <div className="absolute -top-4 -right-4 z-30 pointer-events-none">
+                  {hostReaction === 'correct' && (
+                    <div className="text-5xl animate-bounce drop-shadow-[0_0_15px_rgba(74,222,128,0.8)] filter brightness-110">
+                       ⭐
+                    </div>
+                  )}
+                  {hostReaction === 'incorrect' && (
+                    <div className="text-5xl animate-pulse drop-shadow-[0_0_15px_rgba(248,113,113,0.8)] filter brightness-110">
+                       ⛈️
+                    </div>
+                  )}
+                </div>
+
                 <img 
                   src={selectedHost.avatar} 
                   alt={selectedHost.name} 
-                  className={`w-40 h-40 md:w-56 md:h-56 rounded-full border-4 shadow-2xl transition-all duration-500 relative z-10 ${
-                    hostReaction === 'correct' ? 'border-green-400 scale-105 animate-bounce' : 
-                    hostReaction === 'incorrect' ? 'border-indigo-400 grayscale-[20%] animate-pulse' : 
+                  className={`w-32 h-32 md:w-40 md:h-40 rounded-full border-4 shadow-2xl transition-all duration-500 relative z-10 ${
+                    hostReaction === 'correct' ? 'border-green-400 scale-105' : 
+                    hostReaction === 'incorrect' ? 'border-indigo-400 grayscale-[40%] scale-95' : 
                     isHostSpeaking ? 'border-yellow-400 scale-105 shadow-yellow-400/40' : 'border-gray-600'
                   }`} 
                 />
                 
-                {hostReaction === 'correct' && (
-                  <div className="absolute top-0 right-0 z-20 bg-green-500 text-white w-12 h-12 rounded-full flex items-center justify-center shadow-lg animate-[bounce_1s_infinite]">
-                    <i className="fas fa-smile text-2xl"></i>
-                  </div>
-                )}
-                {hostReaction === 'incorrect' && (
-                  <div className="absolute top-0 right-0 z-20 bg-indigo-600 text-white w-12 h-12 rounded-full flex items-center justify-center shadow-lg animate-[pulse_1.5s_infinite]">
-                    <i className="fas fa-lightbulb text-2xl"></i>
-                  </div>
-                )}
-
                 <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 bg-gray-900 px-4 py-2 rounded-full border border-gray-700 shadow-lg z-20">
                   <AudioVisualizer isSpeaking={isHostSpeaking} color={hostReaction === 'correct' ? '#4ade80' : hostReaction === 'incorrect' ? '#818cf8' : '#eab308'} />
                 </div>
               </div>
 
-              <div className="flex-1 text-center md:text-left">
-                <div className="flex flex-wrap justify-center md:justify-start gap-2 mb-3">
-                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-widest transition-colors ${
-                    hostReaction === 'correct' ? 'bg-green-500/20 text-green-400' : 
-                    hostReaction === 'incorrect' ? 'bg-indigo-500/20 text-indigo-400' : 
-                    'bg-orange-500/20 text-orange-400'
-                  }`}>
-                    {hostReaction === 'neutral' ? 'LIVE SESSION' : hostReaction.toUpperCase()}
-                  </span>
-                  <span className="bg-red-500/20 text-red-400 text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-widest">
-                    {difficulty}
-                  </span>
-                </div>
-                <h2 className="text-3xl font-black mb-1">{selectedHost.name}</h2>
-                
-                <div className={`bg-black/40 rounded-2xl p-6 min-h-[140px] flex items-center justify-center text-center backdrop-blur-sm border transition-all duration-300 ${
-                  hostReaction === 'correct' ? 'border-green-500/30 bg-green-950/20' : 
-                  hostReaction === 'incorrect' ? 'border-indigo-500/30 bg-indigo-950/20' : 
-                  'border-white/5'
-                }`}>
-                  <p className="text-xl md:text-2xl font-medium leading-relaxed text-gray-100">
-                    {transcriptions.length > 0 
-                      ? transcriptions[transcriptions.length - 1].text 
-                      : `Welcome to the show! We're doing ${topic} on ${difficulty} difficulty.`}
-                  </p>
-                </div>
+              <div className="flex-1 w-full text-center md:text-left">
+                 <div className="flex justify-center md:justify-start items-center gap-2 mb-2">
+                    <h2 className="text-2xl font-black">{selectedHost.name}</h2>
+                    <span className={`text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-widest transition-colors ${
+                      hostReaction === 'correct' ? 'bg-green-500/20 text-green-400' : 
+                      hostReaction === 'incorrect' ? 'bg-indigo-500/20 text-indigo-400' : 
+                      'bg-orange-500/20 text-orange-400'
+                    }`}>
+                      {hostReaction === 'neutral' ? 'LIVE' : hostReaction.toUpperCase()}
+                    </span>
+                 </div>
+                 <p className="text-sm text-gray-400 italic line-clamp-1">{selectedHost.description}</p>
               </div>
             </div>
+            
+            {currentQuestion && (
+              <TriviaCard 
+                question={currentQuestion}
+                questionNumber={Math.min(displayQuestionIndex + 1, 5)}
+                totalQuestions={5}
+                reaction={hostReaction}
+                revealAnswer={hostReaction !== 'neutral'}
+                onOptionSelect={handleOptionSelect}
+                onHintRequest={handleHintRequest}
+                isInteractionDisabled={isProcessingAnswer}
+                hasUsedHint={hasUsedHint}
+              />
+            )}
           </div>
 
-          <div className="bg-gray-800/50 rounded-2xl p-6 border border-gray-700 max-h-60 overflow-y-auto shadow-inner">
-            <h3 className="text-sm font-bold text-gray-500 uppercase mb-4 sticky top-0 bg-gray-800/95 py-1 z-10">Live Transcription</h3>
-            <div className="space-y-4">
-              {transcriptions.map((t, i) => (
+          <div className="bg-gray-800/50 rounded-2xl p-6 border border-gray-700 max-h-40 overflow-y-auto shadow-inner">
+            <h3 className="text-xs font-bold text-gray-500 uppercase mb-2 sticky top-0 bg-gray-800/95 py-1 z-10">Live Transcript</h3>
+            <div className="space-y-3">
+              {transcriptions.slice(-3).map((t, i) => (
                 <div key={i} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] px-4 py-2 rounded-2xl text-sm ${
+                  <div className={`max-w-[90%] px-3 py-2 rounded-xl text-xs ${
                     t.role === 'user' 
                     ? 'bg-orange-600/20 text-orange-200 rounded-br-none border border-orange-500/30' 
                     : 'bg-gray-700/50 text-gray-300 rounded-bl-none border border-white/5'
                   }`}>
-                    <span className="text-[10px] block opacity-50 mb-1 uppercase font-bold tracking-tighter">
-                      {t.role === 'user' ? 'You' : selectedHost.name}
+                    <span className="font-bold opacity-50 mr-2 uppercase tracking-tighter">
+                      {t.role === 'user' ? 'You' : 'Host'}:
                     </span>
                     {t.text}
                   </div>
@@ -481,7 +643,7 @@ const App: React.FC = () => {
             <div className="flex items-center gap-3">
               <div className={`w-3 h-3 rounded-full ${isHostSpeaking ? 'bg-gray-600' : 'bg-green-500 animate-pulse ring-4 ring-green-500/20'}`}></div>
               <span className="text-xs font-bold text-gray-400 uppercase tracking-widest">
-                {isHostSpeaking ? `${selectedHost.name} is speaking...` : 'Listening for your answer...'}
+                {isHostSpeaking ? `${selectedHost.name} is speaking...` : 'Mic Open - Say your answer or Tap options'}
               </span>
             </div>
             <button 
@@ -503,6 +665,42 @@ const App: React.FC = () => {
             <h2 className="text-4xl font-black mb-2 uppercase italic tracking-tighter">Final Score</h2>
             <div className="text-7xl font-black text-yellow-500 mb-6 drop-shadow-lg">{score} <span className="text-2xl text-gray-500">/ 5</span></div>
             
+            {score >= bestScore && score > 0 && (
+               <div className="inline-block bg-yellow-500/20 text-yellow-500 px-4 py-1 rounded-full text-xs font-bold uppercase tracking-widest mb-6 animate-bounce">
+                  New Personal Best!
+               </div>
+            )}
+            
+            {/* Leaderboard Input Section */}
+            {qualifiesForLeaderboard && !hasSavedScore ? (
+              <div className="mt-6 mb-8 bg-black/30 p-6 rounded-2xl border border-yellow-500/30 animate-pulse-subtle">
+                <h3 className="text-xl font-bold text-yellow-400 mb-2 uppercase">You made the Leaderboard!</h3>
+                <div className="flex flex-col md:flex-row gap-3 justify-center items-center">
+                   <input 
+                     type="text" 
+                     maxLength={12}
+                     placeholder="Enter your name..." 
+                     value={playerName}
+                     onChange={(e) => setPlayerName(e.target.value)}
+                     className="bg-gray-900 border border-gray-600 rounded-xl px-4 py-2 text-center text-white focus:border-yellow-500 focus:outline-none w-full md:w-auto"
+                   />
+                   <button 
+                     onClick={handleSaveScore}
+                     disabled={!playerName.trim()}
+                     className="bg-yellow-500 text-black px-6 py-2 rounded-xl font-bold uppercase hover:bg-yellow-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors w-full md:w-auto"
+                   >
+                     Claim Spot
+                   </button>
+                </div>
+              </div>
+            ) : hasSavedScore && (
+               <div className="mt-6 mb-8">
+                 <span className="bg-green-500/20 text-green-400 px-6 py-2 rounded-full font-bold uppercase tracking-widest border border-green-500/30">
+                    <i className="fas fa-check-circle"></i> Score Saved
+                 </span>
+               </div>
+            )}
+
             <p className="text-gray-400 text-xl max-w-md mx-auto mb-8">
               {selectedHost.name} just finished your {difficulty} {topic} challenge.
             </p>
@@ -524,6 +722,11 @@ const App: React.FC = () => {
                             <p className="text-sm text-gray-400 mt-2">
                                <span className="text-xs uppercase font-bold tracking-widest text-gray-500 mr-2">Answer:</span> 
                                {res.correctAnswer}
+                               {res.hintUsed && (
+                                  <span className="ml-3 inline-block bg-indigo-500/20 text-indigo-400 text-[10px] px-2 py-0.5 rounded border border-indigo-500/30">
+                                    <i className="fas fa-magic mr-1"></i> Hint Used
+                                  </span>
+                               )}
                             </p>
                          </div>
                       </div>
@@ -532,12 +735,20 @@ const App: React.FC = () => {
              </div>
           </div>
           
-          <button
-            onClick={() => setStatus(GameStatus.SETUP)}
-            className="w-full bg-yellow-500 text-black py-6 rounded-2xl font-black uppercase text-2xl hover:scale-[1.01] transition-all shadow-xl shadow-yellow-500/20 flex items-center justify-center gap-4"
-          >
-            <i className="fas fa-redo"></i> Play Another Show
-          </button>
+          <div className="flex flex-col md:flex-row gap-4">
+            <button
+              onClick={() => setShowLeaderboard(true)}
+              className="flex-1 bg-gray-700 text-gray-300 py-6 rounded-2xl font-black uppercase text-xl hover:bg-gray-600 transition-all shadow-lg flex items-center justify-center gap-4"
+            >
+              <i className="fas fa-list-ol"></i> Leaderboard
+            </button>
+            <button
+              onClick={() => setStatus(GameStatus.SETUP)}
+              className="flex-[2] bg-yellow-500 text-black py-6 rounded-2xl font-black uppercase text-2xl hover:scale-[1.01] transition-all shadow-xl shadow-yellow-500/20 flex items-center justify-center gap-4"
+            >
+              <i className="fas fa-redo"></i> Play Another Show
+            </button>
+          </div>
         </div>
       )}
 
