@@ -97,6 +97,7 @@ const TriviaCard: React.FC<TriviaCardProps> = ({
             // Determine style based on state
             let optionStyle = "border-gray-700 bg-gray-900/50 text-gray-300";
             let cursorStyle = "cursor-pointer hover:border-yellow-500/50 hover:bg-gray-800";
+            let animationClass = "";
 
             if (revealAnswer) {
               cursorStyle = "cursor-default";
@@ -109,8 +110,15 @@ const TriviaCard: React.FC<TriviaCardProps> = ({
               }
             } else if (isSelected) {
               optionStyle = "border-yellow-500 bg-yellow-500/20 text-yellow-200 font-bold shadow-[0_0_10px_rgba(234,179,8,0.2)]";
+              // While waiting for AI response, make selected option pulse
+              if (isInteractionDisabled && !revealAnswer) {
+                animationClass = "animate-pulse";
+              }
             } else if (isInteractionDisabled) {
-               cursorStyle = "cursor-not-allowed opacity-70";
+               // When waiting for AI response, non-selected options pulse to show "Processing"
+               cursorStyle = "cursor-not-allowed opacity-50";
+               animationClass = "animate-pulse";
+               optionStyle = "border-gray-700/50 bg-gray-900/30 text-transparent relative overflow-hidden";
             }
 
             return (
@@ -121,10 +129,24 @@ const TriviaCard: React.FC<TriviaCardProps> = ({
                 className={`
                   p-4 rounded-xl border-2 text-sm md:text-base text-center transition-all duration-300
                   flex items-center justify-center min-h-[60px] active:scale-[0.98]
-                  ${optionStyle} ${cursorStyle}
+                  ${optionStyle} ${cursorStyle} ${animationClass}
                 `}
               >
-                {opt}
+                {/* Visual feedback for thinking state - Skeleton Bar for unselected items */}
+                {isInteractionDisabled && !isSelected && !revealAnswer && (
+                  <div className="absolute inset-0 bg-gray-700/50 animate-pulse rounded-lg m-1"></div>
+                )}
+
+                {/* Selected Item Spinner */}
+                {isInteractionDisabled && !revealAnswer && isSelected && (
+                   <span className="flex items-center gap-2">
+                     <i className="fas fa-circle-notch fa-spin text-yellow-500"></i>
+                     <span>Checking...</span>
+                   </span>
+                )}
+                
+                {/* Normal text display - hidden if unselected skeleton active */}
+                {(!isInteractionDisabled || revealAnswer || isSelected) && opt}
               </button>
             );
           })}

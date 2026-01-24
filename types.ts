@@ -6,6 +6,7 @@ export interface HostPersonality {
   voiceName: 'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Zephyr';
   prompt: string;
   avatar: string;
+  isCustom?: boolean;
 }
 
 export interface TriviaQuestion {
@@ -21,6 +22,7 @@ export interface QuestionResult {
   correctAnswer: string;
   userWasCorrect: boolean;
   hintUsed: boolean;
+  responseTime: number; // ms
 }
 
 export interface LeaderboardEntry {
@@ -28,6 +30,23 @@ export interface LeaderboardEntry {
   score: number;
   topic: string;
   date: string;
+}
+
+export interface GameHistoryEntry {
+  id: string;
+  date: string;
+  topic: string;
+  difficulty: string;
+  score: number;
+  hostName: string;
+}
+
+export interface AppSettings {
+  hostVolume: number; // 0.0 to 1.0
+  sfxVolume: number; // 0.0 to 1.0
+  defaultHostId: string;
+  hasSeenTutorial: boolean;
+  showInGameStats: boolean;
 }
 
 export enum GameStatus {
@@ -46,4 +65,11 @@ export enum Difficulty {
 export interface TranscriptionItem {
   role: 'user' | 'model';
   text: string;
+}
+
+export interface LiveStats {
+  currentStreak: number;
+  longestStreak: number;
+  avgResponseTime: number; // ms
+  totalQuestionsAnswered: number;
 }

@@ -3,7 +3,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>AI Trivia Host</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -17,8 +17,42 @@
   }
 }
 </script>
+<style>
+  /* Personality Animations */
+  @keyframes nod {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(5px); }
+  }
+  .animate-personality-nod { animation: nod 3s ease-in-out infinite; }
+
+  @keyframes bounce-fun {
+    0%, 100% { transform: translateY(0) rotate(0); }
+    25% { transform: translateY(-10px) rotate(-5deg); }
+    75% { transform: translateY(-5px) rotate(5deg); }
+  }
+  .animate-personality-bounce { animation: bounce-fun 2s ease-in-out infinite; }
+
+  @keyframes sway {
+    0%, 100% { transform: translateX(-5px); }
+    50% { transform: translateX(5px); }
+  }
+  .animate-personality-sway { animation: sway 5s ease-in-out infinite; }
+
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-10px); }
+  }
+  .animate-personality-float { animation: float 4s ease-in-out infinite; }
+
+  @keyframes shake-energetic {
+    0%, 100% { transform: rotate(0); }
+    25% { transform: rotate(3deg); }
+    75% { transform: rotate(-3deg); }
+  }
+  .animate-personality-shake { animation: shake-energetic 0.5s linear infinite; }
+</style>
 </head>
-<body class="bg-gray-900 text-white min-h-screen">
+<body class="bg-gray-900 text-white min-h-[100dvh] overflow-x-hidden">
     <div id="root"></div>
 </body>
 </html>
